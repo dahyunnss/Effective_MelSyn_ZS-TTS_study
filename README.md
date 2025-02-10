@@ -7,7 +7,7 @@ You can install the Python dependencies with
 pip install -r requirements.txt
 ```
 
-## Data
+## Dataset
 The supported datasets are
 
 - [LibriTTS](https://research.google/tools/datasets/libri-tts/): a multi-speaker English dataset containing 585 hours of speech by 2456 speakers.
