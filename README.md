@@ -1,5 +1,5 @@
 # Effective_MelSyn_ZS-TTS_study
-This repository is made for the A Study on Effective Mel-Spectrogram Synthesis using Multiple Speakers Sample for Zero-shot Text-To-Speech Task based on "SC-CNN: Effective Speaker Conditioning Method for Zero-Shot Multi-Speaker Text-to-Speech Systems" from IEEE Signal Processing Letters 2023. [Official Repository](https://github.com/hcy71o/SC-CNN/tree/SC-StyleSpeech)
+This repository is made for the A Study on Effective Mel-Spectrogram Synthesis using Multiple Speakers Sample for Zero-shot Text-To-Speech Task based on "SC-CNN: Effective Speaker Conditioning Method for Zero-Shot Multi-Speaker Text-to-Speech Systems" from IEEE Signal Processing Letters 2023. [[Official Repository]](https://github.com/hcy71o/SC-CNN/tree/SC-StyleSpeech)
 
 ## Requirements
 You can install the Python dependencies with
