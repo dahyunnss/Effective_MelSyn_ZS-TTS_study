@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from models.Modules import LinearNorm, ConvNorm, get_sinusoid_encoding_table
+from models_new_2conv.Modules import LinearNorm, ConvNorm, get_sinusoid_encoding_table
 import utils
 
 

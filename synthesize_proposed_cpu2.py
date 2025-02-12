@@ -16,7 +16,7 @@ from hifigan.models import Generator as HiFiGAN
 import hifigan
 from text import text_to_sequence
 import audio as Audio
-import utils
+import utils_cpu as utils
 import time
 from tqdm import tqdm
 import traceback
@@ -213,7 +213,7 @@ def get_SCCNN_LO_HI(config, checkpoint_path, device):
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
-    print(f"Checkpoint keys: {checkpoint.keys()}")
+    #print(f"Checkpoint keys: {checkpoint.keys()}")
     model_lo = SCCNN_Low(config).to(device)
     model_hi = SCCNN_High(config).to(device)
     
@@ -222,8 +222,8 @@ def get_SCCNN_LO_HI(config, checkpoint_path, device):
         raise KeyError(f"Checkpoint does not contain expected keys. Found keys: {checkpoint.keys()}")
 
     # 🔥 모델 상태 딕셔너리 키 확인
-    print("Model LO keys:", model_lo.state_dict().keys())
-    print("Checkpoint LO keys:", checkpoint['model_lo'].keys())
+    # print("Model LO keys:", model_lo.state_dict().keys())
+    # print("Checkpoint LO keys:", checkpoint['model_lo'].keys())
 
     try:
         model_lo.load_state_dict(checkpoint['model_lo'])
@@ -263,30 +263,43 @@ def get_vocoder(config, device):
 
     return vocoder
 
-def mel2wav(mel, vocoder, device):
+def mel2wav(mel_np, vocoder, device):
     """
     mel: np.array or torch.Tensor
          shape = [T, n_mel_channels] 혹은 [n_mel_channels, T]
     vocoder: HiFi-GAN Generator (get_vocoder에서 불러옴)
     """
-    if isinstance(mel, np.ndarray):
-        mel = torch.from_numpy(mel)
-        
-    mel = mel.unsqueeze(0).to(device).float()  # [1, 80, T]
-    if mel.dim() == 4:  # ❌ 잘못된 차원: [1, 1, 80, T]
-        mel = mel.squeeze(1) 
-
+    
+    if mel_np.ndim == 2:  # [80, T]
+        mel = torch.from_numpy(mel_np).unsqueeze(0)  # => [1, 80, T]
+    else:
+        mel = torch.from_numpy(mel_np)  # 이미 배치 차원 있으면 그대로 사용
+    
+    mel = mel.to(device).float()
     with torch.no_grad():
-        audio = vocoder(mel)
-    audio = audio.squeeze().cpu().numpy()  # -> [audio_length]
+        audio = vocoder(mel)  # => [1, audio_len]
+    audio = audio.squeeze().cpu().numpy()
     return audio
+
+
+    # if isinstance(mel, np.ndarray):
+    #     mel = torch.from_numpy(mel)
+        
+    # mel = mel.unsqueeze(0).to(device).float()  # [1, 80, T]
+    # if mel.dim() == 4:  # ❌ 잘못된 차원: [1, 1, 80, T]
+    #     mel = mel.squeeze(1) 
+
+    # with torch.no_grad():
+    #     audio = vocoder(mel)
+    # audio = audio.squeeze().cpu().numpy()  # -> [audio_length]
+    # return audio
 
 
 
 def synthesize(args, text, model_lo, model_hi, _stft, log_filename,device):  
-    print(f"Requested device: {device}")
-    print(f"CUDA available: {torch.cuda.is_available()}")
-    print(f"Current device: {torch.cuda.current_device() if torch.cuda.is_available() else 'CPU'}")
+    # print(f"Requested device: {device}")
+    # print(f"CUDA available: {torch.cuda.is_available()}")
+    # print(f"Current device: {torch.cuda.current_device() if torch.cuda.is_available() else 'CPU'}")
     
     save_path = args.save_path
     if not os.path.exists(save_path):
@@ -327,23 +340,12 @@ def synthesize(args, text, model_lo, model_hi, _stft, log_filename,device):
                     print(f"   {i+1}. {line}")
                 raise ValueError(f"❌ ERROR: No matching text found for {base_name}. Please check the input text file.")
 
-            # # ✅ `text`에서 `ref_audio`의 `base_name`과 일치하는 텍스트 찾기
-            # matched_text = None
-            # for txt in text:
-            #     if base_name in txt:
-            #         matched_text = txt
-            #         break  # 첫 번째 매칭된 텍스트 사용
-
-            # if not matched_text:
-            #     raise ValueError(f"❌ ERROR: No matching text found for {base_name}. Please check the input text file.")
-
-            # print(f"✅ Matched text for {base_name}: {matched_text}")
-
-
-            ref_mel = preprocess_audio(ref_audio, args.sampling_rate, _stft).transpose(0,1).unsqueeze(0)
-            print("ref_mel", ref_mel.shape) #1,80,77
+            # 1) 레퍼런스 멜 추출
+            ref_mel = preprocess_audio(ref_audio, args.sampling_rate, _stft)
+            ref_mel = ref_mel.transpose(0,1).unsqueeze(0)
+            print("ref_mel", ref_mel.shape) #[1, 65, 40]
         
-            # Extract style vectors
+            # 2) 스타일 벡터
             style_vector_lo = model_lo.get_style_vector(ref_mel).to(device)
             style_vector_hi = model_hi.get_style_vector(ref_mel).to(device)
             print(f"Style Vector Shapes - LO: {style_vector_lo.shape}, HI: {style_vector_hi.shape}")
@@ -353,62 +355,55 @@ def synthesize(args, text, model_lo, model_hi, _stft, log_filename,device):
             inference_times = []
             rtf_scores = []
 
+            # 3) 텍스트 전처리
             # Forward
             src = preprocess_english(matched_text, args.lexicon_path).unsqueeze(0).to(device)
             src_len = torch.tensor([src.shape[1]], device=device)
             print(f"📝 Text input shape: {src.shape}, src_len: {src_len}")
 
-                # for txt in text:
-                #     src = preprocess_english(txt, args.lexicon_path).unsqueeze(0).to(device)
-                #     src_len = torch.tensor([src.shape[1]], device=device)
-                #     print(f"Text input shape: {src.shape}, src_len: {src_len}")
-                    
+            # 4) 모델 추론
             cpu_start = time.process_time()
             with torch.no_grad():
-                mel_output_lo = model_lo.inference(style_vector_lo, src, src_len)[0]
-                mel_output_hi = model_hi.inference(style_vector_hi, src, src_len)[0]
-            cpu_end = time.process_time()
+                raw_lo = model_lo.inference(style_vector_lo, src, src_len)
+                raw_hi = model_hi.inference(style_vector_hi, src, src_len)
 
+            cpu_end = time.process_time()
             inf_time = cpu_end - cpu_start
             inference_times.append(inf_time)
             
+            mel_output_lo = raw_lo[0]
+            mel_output_hi = raw_hi[0]
             print(f"mel_output_lo shape: {mel_output_lo.shape}, mel_output_hi shape: {mel_output_hi.shape}")
             
-            # ✅ **Zero-padding으로 길이 맞추기**
-            # 두 출력의 시간 길이를 맞추기 위해 제로 패딩 적용
-            max_T = max(mel_output_lo.shape[1], mel_output_hi.shape[1])
-            mel_output_lo = torch.nn.functional.pad(mel_output_lo, (0, 0, 0, max_T - mel_output_lo.shape[1]))
-            mel_output_hi = torch.nn.functional.pad(mel_output_hi, (0, 0, 0, max_T - mel_output_hi.shape[1]))
-            print(f"Adjusted length with padding: {max_T}")
+            # 5) 시간 축 맞춰 패딩(0번 축이 시간)
+            T_lo = mel_output_lo.shape[1]
+            T_hi = mel_output_hi.shape[1]
+            max_T = max(T_lo, T_hi)
             
-            # ★ 문제 1: HI 분기의 정규화 방식을 변경하여, LO 분기의 평균과 표준편차에 맞추는 모멘트 매칭 수행
-            lo_mean = mel_output_lo.mean()
-            lo_std = mel_output_lo.std()
-            hi_mean = mel_output_hi.mean()
-            hi_std = mel_output_hi.std()
-            print(f"Before normalization: LO mean = {lo_mean:.4f}, LO std = {lo_std:.4f}; HI mean = {hi_mean:.4f}, HI std = {hi_std:.4f}")
+            # time축(dim=1)으로 패딩
+            mel_output_lo = torch.nn.functional.pad(
+                mel_output_lo, (0, 0, 0, max_T - T_lo)
+            )  # => [1, max_T, 40]
+            mel_output_hi = torch.nn.functional.pad(
+                mel_output_hi, (0, 0, 0, max_T - T_hi)
+            )
+            # 6) 모멘트 매칭(정규화)
+            # lo_mean, lo_std = mel_output_lo.mean(), mel_output_lo.std()
+            # hi_mean, hi_std = mel_output_hi.mean(), mel_output_hi.std()
+            # print(f"Before normalization: LO mean = {lo_mean:.4f}, LO std = {lo_std:.4f}; HI mean = {hi_mean:.4f}, HI std = {hi_std:.4f}")
             
-            # HI 분기의 값들을 (원래값 - HI 평균)을 (LO 표준편차 / HI 표준편차)로 스케일링한 후, LO 평균을 더한다.
-            mel_output_hi = (mel_output_hi - hi_mean) * (lo_std / (hi_std + 1e-5)) + lo_mean
-            print(f"After normalization: HI mean = {mel_output_hi.mean():.4f}, HI std = {mel_output_hi.std():.4f}")
+            # mel_output_hi = (mel_output_hi - hi_mean) * (lo_std / (hi_std + 1e-5)) + lo_mean
+            # print(f"After normalization: HI mean = {mel_output_hi.mean():.4f}, HI std = {mel_output_hi.std():.4f}")
 
-            # ★ 문제 2: HI 분기가 주파수 축 방향(마지막 차원)으로 반전되었는지 확인하고, 필요 시 뒤집는다.
-            # 첫 번째 주파수 대역의 평균 값과 마지막 대역의 평균 값을 비교한다.
-            if mel_output_hi[..., 0].mean() < mel_output_hi[..., -1].mean():
-                print("HI spectrum appears reversed. Flipping the HI output along the frequency axis.")
-                mel_output_hi = torch.flip(mel_output_hi, dims=[2])
-                
-            # 두 분기를 채널 차원(마지막 차원)에서 결합하여 80채널 mel 스펙트로그램을 생성한다.
+            # freq축(dim=2)으로 concat => [1, max_T, 80]
             mel_output = torch.cat([mel_output_lo, mel_output_hi], dim=2)  # shape: [1, T, 80]
-            mel_output = mel_output.permute(0, 2, 1)  # 최종 shape: [1, 80, T]
-            print(f"Final mel_output shape (for HiFi-GAN): {mel_output.shape}")
-            print(f"mel_output before vocoder: min = {mel_output.min()}, max = {mel_output.max()}, mean = {mel_output.mean()}")
-                                            
-            # 시각화를 위하여 멜 스펙트로그램을 저장 (데시벨 스케일 변환은 plot_spectrogram 내에서 수행됨)
-            mel_output_log = mel_output.cpu().numpy()
-            mel_output_log = torch.log1p(torch.abs(mel_output))  
+            print(f"[DEBUG] Final mel_output shape (time, freq=80): {mel_output.shape}")
             
-            # ✅ **최종 파일명 (basename만 사용)**
+            # 9) HiFi‐GAN에 맞춰 [1, 80, max_T]로 permute(저장, 시각화를 위함)
+            mel_output = mel_output.permute(0, 2, 1)
+            print("Final mel_output for vocoder:", mel_output.shape)  # [1, 80, max_T]
+
+            # 10) mel_spectrogram 저장
             wav_save_path = os.path.join(save_path, f"{base_name}.wav")
             npy_save_path = os.path.join(save_path, f"{base_name}.npy")
             np.save(npy_save_path, mel_output.cpu().numpy()) 
@@ -417,15 +412,17 @@ def synthesize(args, text, model_lo, model_hi, _stft, log_filename,device):
             img_save_path = os.path.join(save_path, f"{base_name}_mel_comparison.png")
             print(f"📝 img_save_path: {img_save_path}")
             
+            # 시각화
             if os.path.exists(npy_save_path):
                 visualize_mel_spectrograms(base_name, save_path, args.ref_audio_dir)
-                #base_name, save_path, args.ref_audio_dir
             else:
                 print(f"❌ [ERROR] .npy file not found: {npy_save_path}")
 
                 
-            # ✅ HiFi-GAN vocoder를 통해 파형(waveform) 복원
-            wav_output = mel2wav(mel_output.cpu().numpy(), vocoder, device)
+            # 11) Vocoder로부터 파형 복원
+            #    mel2wav 안에서 [1, 80, T] 형태로 변환하도록 수정
+            #wav_output = mel2wav(mel_output.cpu().numpy(), vocoder, device)
+            wav_output = mel2wav(mel_output.squeeze(0).cpu().numpy(), vocoder, device)
 
             # ✅ WAV 파일 저장 (base_name 유지)
             sf.write(wav_save_path, wav_output, args.sampling_rate)
@@ -450,13 +447,11 @@ def synthesize(args, text, model_lo, model_hi, _stft, log_filename,device):
             log_data(log_filename, f"{txt.split('|')[0]}: MCD Score = {mcd_value:}, PESQ Score = {pesq_value:}, RTF = {rtf:}")
             log_data(log_filename, f"Inference Time: {inf_time:} seconds")
 
-             # ✅ 전체 리스트에 추가 (최종 평균 계산을 위해)
             all_mcd_scores.append(mcd_value)
             all_pesq_scores.append(pesq_value)
             all_inference_times.append(inf_time)
             all_rtf_scores.append(calculate_rtf(len(wav_output) / args.sampling_rate, inf_time))
 
-            # tqdm 진행 바 업데이트
             progress_bar.update(1)
             
         except Exception as e:

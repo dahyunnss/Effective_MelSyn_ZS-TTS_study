@@ -2,15 +2,15 @@ import torch
 import torch.nn as nn
 import numpy as np
 from text.symbols import symbols
-import models.Constants as Constants
-from models.Modules_cpu import Mish, LinearNorm, ConvNorm, Conv1dGLU, \
+import models_new_2conv.Constants as Constants
+from models_new_2conv.Modules_cpu import Mish, LinearNorm, ConvNorm, Conv1dGLU, \
                     MultiHeadAttention, StyleAdaptiveLayerNorm, get_sinusoid_encoding_table
-from models.VarianceAdaptor import VarianceAdaptor
-from models.Loss import StyleSpeechLoss
+from models_new_2conv.VarianceAdaptor import VarianceAdaptor
+from models_new_2conv.Loss import StyleSpeechLoss
 from utils_cpu import get_mask_from_lengths
 from torch.nn import functional as F
 
-LOG_FILE = 'SCCNN_new_0206_debug_cpu.txt'
+LOG_FILE = 'SCCNN_new_0211_debug_cpu.txt'
 
 def log_debug(message, log_file=LOG_FILE):
     with open(log_file, "a") as f:
@@ -42,31 +42,9 @@ class SCCNN_Low(nn.Module):
         
         return sid, text, mel_target_lo, D, log_D, f0, energy, src_len, mel_len, max_src_len, max_mel_len
 
-        
-    # def parse_batch(self, batch): #cpu
-    #     sid = torch.from_numpy(batch["sid"]).long()
-    #     text = torch.from_numpy(batch["text"]).long()
-    #     mel_target_lo = torch.from_numpy(batch["mel_target_lo"]).float()
-    #     D = torch.from_numpy(batch["D"]).long()
-    #     log_D = torch.from_numpy(batch["log_D"]).float()
-    #     f0 = torch.from_numpy(batch["f0"]).float()
-    #     energy = torch.from_numpy(batch["energy"]).float()
-    #     src_len = torch.from_numpy(batch["src_len"]).long()
-    #     mel_len = torch.from_numpy(batch["mel_len"]).long()
-    #     max_src_len = np.max(batch["src_len"]).astype(np.int32)
-    #     max_mel_len = np.max(batch["mel_len"]).astype(np.int32)
-        
-    #     return sid, text, mel_target_lo, D, log_D, f0, energy, src_len, mel_len, max_src_len, max_mel_len
-
-
     def forward(self, src_seq, src_len, mel_target_lo, mel_len=None, 
                     d_target=None, p_target=None, e_target=None, max_src_len=None, max_mel_len=None):
 
-        
-        # 모든 텐서를 CPU로 이동
-        # src_seq = src_seq.to(self.device)
-        # src_len = src_len.to(self.device)
-        # mel_target_lo = mel_target_lo.to(self.device)
         if mel_len is not None:
             mel_len = mel_len.to(self.device)
 
@@ -168,18 +146,12 @@ class SCCNN_High(nn.Module):
         mel_len = torch.from_numpy(batch["mel_len"]).long()
         max_src_len = np.max(batch["src_len"]).astype(np.int32)
         max_mel_len = np.max(batch["mel_len"]).astype(np.int32)
-        
-        # #시퀀스 길이 검증 추가
-        # if max_src_len <= 0:
-        #     raise ValueError("Error: max_src_len is 0 or negative.")
-        # if max_mel_len <= 0:
-        #     raise ValueError("Error: max_mel_len is 0 or negative.")
+    
         return sid, text, mel_target_hi, D, log_D, f0, energy, src_len, mel_len, max_src_len, max_mel_len
 
 
     def forward(self, src_seq, src_len, mel_target_hi, mel_len=None, 
                     d_target=None, p_target=None, e_target=None, max_src_len=None, max_mel_len=None):
-
         
         # 모든 텐서를 CPU로 이동
         src_seq = src_seq.to(self.device)
@@ -348,76 +320,6 @@ class Encoder(nn.Module):
         enc_output = self.fc_out(enc_output)
         log_debug(f"[Encoder] Final encoder output shape: {enc_output.shape}")
         return enc_output, src_embedded, slf_attn
-
-
-class Decoder(nn.Module):
-    """ Decoder """
-    def __init__(self, config):
-        super(Decoder, self).__init__()
-        self.max_seq_len = config.max_seq_len
-        self.n_layers = config.decoder_layer
-        self.d_model = config.decoder_hidden
-        self.n_head = config.decoder_head
-        self.d_k = config.decoder_hidden // config.decoder_head
-        self.d_v = config.decoder_hidden // config.decoder_head
-        self.d_inner = config.fft_conv1d_filter_size
-        self.fft_conv1d_kernel_size = config.fft_conv1d_kernel_size
-        self.d_out = config.n_mel_channels
-        self.style_dim = config.style_vector_dim
-        self.dropout = config.dropout
-
-        self.prenet = nn.Sequential(
-            nn.Linear(self.d_model, self.d_model//2),
-            Mish(),
-            nn.Dropout(self.dropout),
-            nn.Linear(self.d_model//2, self.d_model)
-        )
-
-        n_position = self.max_seq_len + 1
-        self.position_enc = nn.Parameter(
-            get_sinusoid_encoding_table(n_position, self.d_model).unsqueeze(0), requires_grad = False)
-        #### @@@@@@@@@@@@@
-        self.layer_stack = nn.ModuleList([FFTBlock(
-            self.d_model, self.d_inner, self.n_head, self.d_k, self.d_v, 
-            self.fft_conv1d_kernel_size, self.style_dim, self.dropout) for _ in range(self.n_layers)])
-
-        self.fc_out = nn.Linear(self.d_model, self.d_out)
-
-    def forward(self, enc_seq, style_code, mask):
-        batch_size, max_len = enc_seq.shape[0], enc_seq.shape[1]
-        log_debug(f"[Decoder] Input shape: {enc_seq.shape}")
-      
-        # -- Prepare masks
-        slf_attn_mask = mask.unsqueeze(1).expand(-1, max_len, -1)
-        log_debug(f"[Decoder] Self-attention mask shape: {slf_attn_mask.shape}")
-
-
-        # -- Forward
-        # prenet
-        dec_embedded = self.prenet(enc_seq)
-        log_debug(f"[Decoder] After prenet shape: {dec_embedded.shape}")
-        
-        # poistion encoding
-        if enc_seq.shape[1] > self.max_seq_len:
-            position_embedded = get_sinusoid_encoding_table(enc_seq.shape[1], self.d_model)[:enc_seq.shape[1], :].unsqueeze(0).expand(batch_size, -1, -1).to(enc_seq.device)
-        else:
-            position_embedded = self.position_enc[:, :max_len, :].expand(batch_size, -1, -1)
-            
-        dec_output = dec_embedded + position_embedded
-        log_debug(f"[Decoder] After adding position encoding shape: {dec_output.shape}")
-
-        # fft blocks
-        slf_attn = []
-        for dec_layer in self.layer_stack:
-            dec_output, dec_slf_attn = dec_layer(
-                dec_output, style_code,
-                mask=mask,
-                slf_attn_mask=slf_attn_mask)
-            slf_attn.append(dec_slf_attn)
-        # last fc
-        dec_output = self.fc_out(dec_output)
-        log_debug(f"[Decoder] Final decoder output shape: {dec_output.shape}")
-        return dec_output, slf_attn
 
 class LowDecoder(nn.Module):
     def __init__(self, config):
@@ -612,7 +514,7 @@ class SCFFTBlock(nn.Module):
 
         # ✅ `low`일 때는 추가 인자 없이 호출
         if self.highlow == "low":
-            output = self.pos_ffn(slf_attn_output)
+            output = self.pos_ffn(slf_attn_output, d_w, d_g, d_b, p_w, p_g, p_b)
         else:
             output = self.pos_ffn(slf_attn_output, d_w, d_g, d_b, p_w, p_g, p_b)  # `high`는 기존 방식 유지
 
@@ -708,35 +610,55 @@ class SCPositionwiseFeedForward_high(nn.Module):
         
         return output
     
-class SCPositionwiseFeedForward_low(nn.Module): #linear 로 변경
+class SCPositionwiseFeedForward_low(nn.Module):
     ''' SCCNN and two projection layers '''
     def __init__(self, d_in, d_hid1, d_hid2, dropout=0.1):
         super().__init__()        
-        self.w_1 = nn.Linear(d_in, d_hid1)  # Conv → Linear
-        self.w_2 = nn.Linear(d_hid1, d_in)  # Conv → Linear
+        self.w_1 = ConvNorm(d_in, d_hid1, kernel_size=1)  # ✅ CNN 기반 유지
+        self.w_2 = ConvNorm(d_hid2, d_in, kernel_size=1)
         self.mish = Mish()
         self.dropout = nn.Dropout(dropout)
         
-    def forward(self, input):
-        '''
-        기존 depthwise, pointwise convolution을 제거하고, Linear layer로 대체
-        '''
+    def forward(self, input, d_w, d_g, d_b, p_w, p_g, p_b):
         residual = input
         log_debug(f"[SCPositionwiseFeedForward] Input shape: {input.shape}")
 
-        # 첫 번째 Linear 변환 (Conv1D -> Linear)
-        output = self.w_1(input)
+        # (1) First 1x1 Conv (w_1)
+        # input은 [B,T,d_in], → transpose → [B,d_in,T] → conv → [B,d_hid1,T] → transpose back
+        output = self.w_1(input.transpose(1, 2)).transpose(1, 2)
         output = self.mish(output)
+        # output = self.w_1(input)
+        # output = self.mish(output)
         output = self.dropout(output)
         log_debug(f"[SCPositionwiseFeedForward] After w_1 and Mish activation: {output.shape}")
 
-        # 두 번째 Linear 변환 (Conv1D -> Linear)
-        output = self.w_2(output)
-        output = self.dropout(output)
-        log_debug(f"[SCPositionwiseFeedForward] After w_2 projection: {output.shape}")
+        output_c_first = output.transpose(1, 2) 
+        kernel_size = d_w.size(-1)
+        p = (kernel_size - 1) // 2
+        
+        x_padded = F.pad(output_c_first, (p, p))
+        x_unfolded = x_padded.unfold(2, kernel_size, 1) 
+        
+        d_w = nn.functional.normalize(d_w, dim=1) * d_g.unsqueeze(-1).unsqueeze(-1)
+        p_w = nn.functional.normalize(p_w, dim=1) * p_g.unsqueeze(-1).unsqueeze(-1)
 
+        d_w = d_w.expand(-1, -1, x_unfolded.shape[2], -1)
+        x = torch.einsum('bctk, bcwk->bct', x_unfolded, d_w)
+        
+        x += d_b.unsqueeze(2)
+        
+        x = torch.einsum('bct,bco->bot', x, p_w.squeeze(-1))
+        x += p_b.unsqueeze(2)
+        
+        
+        # (2) First 1x1 Conv (w_1)
+        x_t = x.transpose(1, 2)
+        out_2 = self.w_2(x_t.transpose(1, 2)).transpose(1, 2)
+        
+        out_2 = self.dropout(out_2) 
+        
         # Residual 연결
-        output = output + residual
+        output = out_2 + residual
         log_debug(f"[SCPositionwiseFeedForward] Final output shape: {output.shape}")
 
         return output
